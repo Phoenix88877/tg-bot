@@ -1,88 +1,50 @@
 // reminder.js
 
-/**
- * Инициализация напоминаний по кредитам
- * @param {TelegramBot} bot
- * @param {sqlite3.Database} db
- * @param {Function} getAllCredits - функция (db, cb) → cb(credits[])
- * @param {number} ownerMainId - твой Telegram ID (главный)
- */
-function initReminders(bot, db, getAllCredits, ownerMainId) {
-  const CHECK_INTERVAL_MS = 60 * 60 * 1000; // раз в час
+/************************************************************
+ * Напоминания о платеже по кредитам
+ * Каждые 15 минут проверяем:
+ *  - если уже после 09:00
+ *  - если ещё не отправляли сегодня
+ *  - ищем кредиты с pay_day == сегодняшнее число
+ *  - присылаем владельцу (OWNER_MAIN) список
+ ************************************************************/
+function initReminders(bot, db, getCreditsDueToday, mainOwnerId) {
+  let lastNotifiedDate = null; // 'YYYY-MM-DD'
 
-  const TABLE_CREDITS = "Credits";
-
-  function getNextPaymentDate(paymentDay) {
+  setInterval(() => {
     const now = new Date();
-    const year = now.getFullYear();
-    const month = now.getMonth();
-    const candidate = new Date(year, month, paymentDay);
+    const todayDate = now.toISOString().slice(0, 10);
+    const dayOfMonth = now.getDate();
 
-    if (candidate < now) {
-      return new Date(year, month + 1, paymentDay).toISOString().split("T")[0];
-    }
-    return candidate.toISOString().split("T")[0];
-  }
+    // Чтоб не спамить — 1 раз в день
+    if (lastNotifiedDate === todayDate) return;
 
-  function updateNextPaymentDate(creditId, paymentDay) {
-    const nextDate = getNextPaymentDate(paymentDay);
-    db.run(
-      `UPDATE ${TABLE_CREDITS} SET next_payment_date = ? WHERE id = ?`,
-      [nextDate, creditId]
-    );
-  }
+    // Отправляем напоминание после 9 утра (по времени сервера)
+    if (now.getHours() < 9) return;
 
-  function checkCredits() {
-    getAllCredits(db, (credits) => {
+    getCreditsDueToday(db, dayOfMonth, (credits) => {
       if (!credits || !credits.length) return;
 
-      const now = new Date();
-      const todayStr = now.toISOString().split("T")[0];
-      const startOfToday = new Date(todayStr + "T00:00:00Z");
+      lastNotifiedDate = todayDate;
+
+      let text = "📅 *Сегодня день платежа по кредитам:*\n\n";
 
       credits.forEach((c) => {
-        if (!c.payment_day) return;
-
-        // если даты нет — создаём и обновляем
-        if (!c.next_payment_date) {
-          const fixed = getNextPaymentDate(c.payment_day);
-          db.run(
-            `UPDATE ${TABLE_CREDITS} SET next_payment_date = ? WHERE id = ?`,
-            [fixed, c.id]
-          );
-          c.next_payment_date = fixed;
-        }
-
-        const due = new Date(c.next_payment_date + "T00:00:00Z");
-        const diffMs = due.getTime() - startOfToday.getTime();
-        const diffDays = Math.round(diffMs / (24 * 60 * 60 * 1000));
-
-        let msg = null;
-
-        if (diffDays === 3) {
-          msg = `🔔 Через 3 дня платёж по кредиту *${c.name}* (${c.amount.toLocaleString()} сум).`;
-        } else if (diffDays === 1) {
-          msg = `🔔 Завтра платёж по кредиту *${c.name}* (${c.amount.toLocaleString()} сум).`;
-        } else if (diffDays === 0) {
-          msg = `🚨 Сегодня платёж по кредиту *${c.name}*!`;
-        } else if (diffDays < -1) {
-          // дата сильно в прошлом — сдвигаем на следующий месяц
-          updateNextPaymentDate(c.id, c.payment_day);
-        }
-
-        if (msg) {
-          bot.sendMessage(ownerMainId, msg, { parse_mode: "Markdown" });
-        }
+        const remaining = Math.max(0, (c.total || 0) - (c.paid || 0));
+        text +=
+          `• *${c.name}*\n` +
+          `  Полная сумма: ${c.total}\n` +
+          `  Выплачено: ${c.paid}\n` +
+          `  Остаток: ${remaining}\n` +
+          `  Ежемесячный платёж: ${c.monthly_payment}\n` +
+          `  День платежа: ${c.pay_day}\n\n`;
       });
+
+      bot.sendMessage(mainOwnerId, text, { parse_mode: "Markdown" });
     });
-  }
-
-  // Запускаем цикл
-  setInterval(checkCredits, CHECK_INTERVAL_MS);
-  // И сразу при старте
-  checkCredits();
-
-  console.log("⏰ Напоминания по кредитам запущены");
+  }, 15 * 60 * 1000); // каждые 15 минут
 }
 
-module.exports = { initReminders };
+module.exports = {
+  initReminders
+};
