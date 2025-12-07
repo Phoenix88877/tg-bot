@@ -1,4 +1,5 @@
 // index.js
+require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 
 const {
@@ -6,13 +7,13 @@ const {
   ensureUserRegistered,
   saveTransaction,
   getAllTransactions,
-  getMonthlyIncome,
   getBalance,
   addCredit,
   getCreditsForOwner,
   getAllCredits,
   updateCreditPaid,
-  deleteCredit
+  deleteCredit,
+  getCreditsDueToday
 } = require("./database");
 
 const { askLlama, analyzeExpenses } = require("./analytics");
@@ -24,10 +25,35 @@ const { initReminders } = require("./reminder");
  ************************************************************/
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
+// заменишь на свои ID (они у тебя уже были)
 const OWNER_MAIN = 1286874826;
 const OWNER_WIFE = 825745634;
 
 const ALLOWED_USERS = [OWNER_MAIN, OWNER_WIFE];
+
+/************************************************************
+ * КАТЕГОРИИ / ПОДКАТЕГОРИИ
+ ************************************************************/
+const INCOME_CATEGORIES = {
+  "Зарплата": ["Оклад", "Премия", "Бонус"],
+  "Бизнес": ["Продажи", "Услуги"],
+  "Подарки": ["Семья", "Друзья"],
+  "Проценты": ["Банк", "Инвестиции"],
+  "Прочее": ["Разное"]
+};
+
+const EXPENSE_CATEGORIES = {
+  "Еда": ["Продукты", "Кафе"],
+  "Покупки": ["Одежда", "Дом", "Мелочи"],
+  "Дом": ["Коммуналка", "Аренда", "Ремонт"],
+  "Машина": ["Топливо", "Ремонт", "Страховка"],
+  "Развлечения": ["Кино", "Путешествия", "Кафе/Бар"],
+  "Здоровье": ["Аптека", "Лечение"],
+  "Кредиты": ["Платёж по кредиту"],
+  "Прочее": ["Разное"]
+};
+
+const CREDIT_CATEGORY_NAME = "Кредиты";
 
 /************************************************************
  * ИНИЦИАЛИЗАЦИЯ
@@ -37,7 +63,8 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 
 console.log("🤖 Семейный финансовый бот запущен!");
 
-initReminders(bot, db, getAllCredits, OWNER_MAIN);
+// напоминания по кредитам (главному владельцу)
+initReminders(bot, db, getCreditsDueToday, OWNER_MAIN);
 
 /************************************************************
  * СОСТОЯНИЯ
@@ -83,6 +110,7 @@ function getMainMenuKeyboard(userId) {
     };
   }
 
+  // главный
   return {
     reply_markup: {
       keyboard: [
@@ -103,64 +131,80 @@ function showMainMenu(chatId, userId) {
 }
 
 /************************************************************
- * МЕНЮ КРЕДИТОВ
+ * КРЕДИТЫ – МЕНЮ/СПИСКИ
  ************************************************************/
 function showCreditsMenu(chatId) {
   bot.sendMessage(chatId, "Выберите действие:", {
     reply_markup: {
       inline_keyboard: [
-        [{ text: "➕ Добавить кредит", callback_data: "add_credit" }],
-        [{ text: "📋 Список кредитов", callback_data: "show_credit_list" }],
-        [{ text: "💰 Оплатить кредит", callback_data: "pay_credit" }],
-        [{ text: "🗑 Удалить кредит", callback_data: "delete_credit" }]
+        [{ text: "➕ Добавить кредит", callback_data: "credit:add" }],
+        [{ text: "📋 Список кредитов", callback_data: "credit:list" }],
+        [{ text: "💰 Оплатить кредит", callback_data: "credit:pay" }],
+        [{ text: "🗑 Удалить кредит", callback_data: "credit:delete" }]
       ]
     }
   });
 }
 
-function showCreditListFor(db, chatId, userId) {
+function sendCreditList(chatId, credits) {
+  if (!credits.length) {
+    return bot.sendMessage(chatId, "Кредитов нет.");
+  }
+
+  let text = "📋 *Кредиты:*\n\n";
+
+  credits.forEach((c) => {
+    const remaining = Math.max(0, (c.total || 0) - (c.paid || 0));
+
+    text +=
+      `*${c.name}*\n` +
+      `• Полная сумма: ${c.total}\n` +
+      `• Выплачено: ${c.paid}\n` +
+      `• Остаток: ${remaining}\n` +
+      `• % годовых: ${c.percent}\n` +
+      `• Ежемесячный платёж: ${c.monthly_payment}\n` +
+      `• День платежа: ${c.pay_day}\n\n`;
+  });
+
+  bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+}
+
+function showCreditListFor(chatId, userId) {
   if (isMain(userId)) {
     getAllCredits(db, (credits) => sendCreditList(chatId, credits));
   } else {
-    getCreditsForOwner(db, userId, (credits) =>
-      sendCreditList(chatId, credits)
-    );
+    getCreditsForOwner(db, userId, (credits) => sendCreditList(chatId, credits));
   }
 }
 
-function sendCreditList(chatId, credits) {
-  if (!credits.length)
-    return bot.sendMessage(chatId, "Кредитов нет.");
+function sendCreditChooseList(chatId, credits, actionPrefix) {
+  if (!credits.length) {
+    return bot.sendMessage(chatId, "Нет кредитов.");
+  }
 
-  let text = "📋 *Кредиты:*\n\n";
-  let total = 0;
-
-  credits.forEach((c) => {
-    const remain = c.amount - c.paid;
-    total += remain;
-
-    const who = c.owner_id === OWNER_MAIN ? "👨" : "👩";
-
-    text += `${who} *${c.name}*\n` +
-            `• Сумма: ${c.amount}\n` +
-            `• Выплачено: ${c.paid}\n` +
-            `• Остаток: ${remain}\n` +
-            `• %: ${c.percent}%\n\n`;
+  const rows = credits.map((c) => {
+    const remaining = Math.max(0, (c.total || 0) - (c.paid || 0));
+    return [
+      {
+        text: `${c.name} (осталось ${remaining})`,
+        callback_data: `${actionPrefix}:${c.id}`
+      }
+    ];
   });
 
-  text += `💰 *Общий долг:* ${total}`;
-
-  bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+  bot.sendMessage(chatId, "Выберите кредит:", {
+    reply_markup: { inline_keyboard: rows }
+  });
 }
 
 function showCreditChooseForPayment(chatId, userId) {
   if (isMain(userId)) {
     getAllCredits(db, (credits) =>
-      sendCreditChooseList(chatId, credits, "choose_credit_payment")
+      sendCreditChooseList(chatId, credits, "credit_pay")
     );
   } else {
     getCreditsForOwner(db, userId, (credits) =>
-      sendCreditChooseList(chatId, credits, "choose_credit_payment")
+      sendCreditChooseList(chatId, credits, "credit_pay")
     );
   }
 }
@@ -168,29 +212,13 @@ function showCreditChooseForPayment(chatId, userId) {
 function showCreditChooseForDelete(chatId, userId) {
   if (isMain(userId)) {
     getAllCredits(db, (credits) =>
-      sendCreditChooseList(chatId, credits, "choose_credit_delete")
+      sendCreditChooseList(chatId, credits, "credit_del")
     );
   } else {
     getCreditsForOwner(db, userId, (credits) =>
-      sendCreditChooseList(chatId, credits, "choose_credit_delete")
+      sendCreditChooseList(chatId, credits, "credit_del")
     );
   }
-}
-
-function sendCreditChooseList(chatId, credits, action) {
-  if (!credits.length)
-    return bot.sendMessage(chatId, "Нет кредитов.");
-
-  const rows = credits.map((c) => [
-    {
-      text: (c.owner_id === OWNER_MAIN ? "👨 " : "👩 ") + c.name,
-      callback_data: `${action}|${c.name}|${c.owner_id}`
-    }
-  ]);
-
-  bot.sendMessage(chatId, "Выберите кредит:", {
-    reply_markup: { inline_keyboard: rows }
-  });
 }
 
 /************************************************************
@@ -200,22 +228,27 @@ function showBalance(chatId, userId) {
   if (isWife(userId)) {
     getBalance(db, userId, ({ income, expense }) => {
       const bal = income - expense;
-      bot.sendMessage(chatId,
+      bot.sendMessage(
+        chatId,
         `📊 *Ваш баланс*\n\n` +
-        `Доход: *${income}*\n` +
-        `Расход: *${expense}*\n` +
-        `Итог: *${bal}*`,
+          `Доход: *${income}*\n` +
+          `Расход: *${expense}*\n` +
+          `Итог: *${bal}*`,
         { parse_mode: "Markdown" }
       );
     });
   } else {
     getBalance(db, OWNER_MAIN, (m) => {
       getBalance(db, OWNER_WIFE, (w) => {
-        bot.sendMessage(chatId,
+        const familyIncome = (m.income || 0) + (w.income || 0);
+        const familyExpense = (m.expense || 0) + (w.expense || 0);
+
+        bot.sendMessage(
+          chatId,
           `📊 *Семейный баланс*\n\n` +
-          `👨 Муж: доход ${m.income}, расход ${m.expense}\n` +
-          `👩 Жена: доход ${w.income}, расход ${w.expense}\n\n` +
-          `🏡 Семья: доход ${m.income + w.income}, расход ${m.expense + w.expense}`,
+            `👨 Муж: доход ${m.income}, расход ${m.expense}\n` +
+            `👩 Жена: доход ${w.income}, расход ${w.expense}\n\n` +
+            `🏡 Семья: доход ${familyIncome}, расход ${familyExpense}`,
           { parse_mode: "Markdown" }
         );
       });
@@ -229,215 +262,436 @@ function showBalance(chatId, userId) {
 function showCreditPlan(chatId, userId) {
   const loader = isMain(userId) ? getAllCredits : getCreditsForOwner;
 
-  if (isMain(userId)) {
-    loader(db, (credits) => sendPlanText(chatId, credits, null));
-  } else {
-    loader(db, userId, (credits) => sendPlanText(chatId, credits, userId));
-  }
-}
+  loader(db, isMain(userId) ? null : userId, (credits) => {
+    if (!credits.length) {
+      return bot.sendMessage(chatId, "Кредитов нет.");
+    }
 
-function sendPlanText(chatId, credits, ownerId) {
-  getMonthlyIncome(db, ownerId, (income) => {
-    let monthly = 0;
+    let text = "📅 *План по кредитам*\n\n";
 
     credits.forEach((c) => {
-      monthly += c.amount * (c.percent / 100 / 12);
+      const remaining = Math.max(0, (c.total || 0) - (c.paid || 0));
+      let monthsLeft = 0;
+
+      if (c.monthly_payment > 0) {
+        monthsLeft = Math.ceil(remaining / c.monthly_payment);
+      }
+
+      text +=
+        `*${c.name}*\n` +
+        `• Остаток: ${remaining}\n` +
+        `• Плановый ежемесячный платёж: ${c.monthly_payment}\n` +
+        `• Примерно месяцев до погашения: ${monthsLeft}\n` +
+        `• День платежа: ${c.pay_day}\n\n`;
     });
 
-    bot.sendMessage(
-      chatId,
-      `📅 *План по кредитам*\n\n` +
-        `Доход в месяц: *${income}*\n` +
-        `Проценты в месяц: *${monthly.toFixed(2)}*`,
-      { parse_mode: "Markdown" }
-    );
+    bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
   });
 }
 
 /************************************************************
- * ДОХОД / РАСХОД
+ * КАТЕГОРИИ / ПОДКАТЕГОРИИ – КЛАВИАТУРЫ
  ************************************************************/
-function beginAddIncome(chatId, userId) {
-  saveUserState(userId, { state: "income_amount" });
-  bot.sendMessage(chatId, "Введите сумму дохода:");
+function buildCategoryKeyboard(map, prefix) {
+  return {
+    reply_markup: {
+      inline_keyboard: Object.keys(map).map((cat) => [
+        { text: cat, callback_data: `${prefix}_cat:${cat}` }
+      ])
+    }
+  };
 }
 
-function beginAddExpense(chatId, userId) {
-  saveUserState(userId, { state: "expense_amount" });
-  bot.sendMessage(chatId, "Введите сумму расхода:");
+function buildSubcategoryKeyboard(map, category, prefix) {
+  const subs = map[category] || [];
+  if (!subs.length) return null;
+
+  return {
+    reply_markup: {
+      inline_keyboard: subs.map((sub) => [
+        { text: sub, callback_data: `${prefix}_sub:${category}:${sub}` }
+      ])
+    }
+  };
 }
 
 /************************************************************
  * ОБРАБОТКА СООБЩЕНИЙ
  ************************************************************/
 bot.on("message", async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id;
-    const text = (msg.text || "").trim();
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const text = (msg.text || "").trim();
 
-    if (!isAllowedUser(userId))
-        return bot.sendMessage(chatId, "⛔ Нет доступа.");
+  if (!isAllowedUser(userId)) {
+    return bot.sendMessage(chatId, "⛔ Нет доступа.");
+  }
 
-    ensureUserRegistered(db, msg.from);
+  ensureUserRegistered(db, msg.from);
 
-    if (text === "/start")
-        return showMainMenu(chatId, userId);
+  if (text === "/start") {
+    clearUserState(userId);
+    return showMainMenu(chatId, userId);
+  }
 
-    // Запуск AI режима
-    if (text === "🤖 AI-помощник") {
-        saveUserState(userId, { state: "ai_mode" });
-        return bot.sendMessage(chatId, "🧠 Напиши вопрос.");
+  if (text === "🤖 AI-помощник") {
+    saveUserState(userId, { state: "ai_mode" });
+    return bot.sendMessage(chatId, "🧠 Напиши вопрос.");
+  }
+
+  const state = getUserState(userId);
+
+  // режим AI
+  if (state?.state === "ai_mode") {
+    try {
+      const reply = await askLlama(text);
+      return bot.sendMessage(chatId, reply);
+    } catch (e) {
+      console.error(e);
+      return bot.sendMessage(chatId, "❌ Ошибка AI.");
     }
+  }
 
-    // 🟡 Обработка кнопок — ДОЛЖНА ИДТИ ДО AI
-    if (text === "➕ Доход") return beginAddIncome(chatId, userId);
-    if (text === "➖ Расход") return beginAddExpense(chatId, userId);
-    if (text === "💳 Кредиты") return showCreditsMenu(chatId);
-    if (text === "📊 Баланс") return showBalance(chatId, userId);
-    if (text === "📅 План по кредитам") return showCreditPlan(chatId, userId);
+  // Кнопки меню
+  if (text === "➕ Доход") {
+    saveUserState(userId, { state: "income_choose_category" });
+    return bot.sendMessage(
+      chatId,
+      "Выберите категорию дохода:",
+      buildCategoryKeyboard(INCOME_CATEGORIES, "inc")
+    );
+  }
 
-    if (text === "📈 Анализ расходов (AI)") {
-        const isFamily = isMain(userId);
-        const owner = isFamily ? null : userId;
-        const result = await analyzeExpenses(db, getAllTransactions, owner, isFamily);
-        return bot.sendMessage(chatId, result, { parse_mode: "Markdown" });
+  if (text === "➖ Расход") {
+    saveUserState(userId, { state: "expense_choose_category" });
+    return bot.sendMessage(
+      chatId,
+      "Выберите категорию расхода:",
+      buildCategoryKeyboard(EXPENSE_CATEGORIES, "exp")
+    );
+  }
+
+  if (text === "💳 Кредиты") {
+    return showCreditsMenu(chatId);
+  }
+
+  if (text === "📊 Баланс") {
+    return showBalance(chatId, userId);
+  }
+
+  if (text === "📅 План по кредитам") {
+    return showCreditPlan(chatId, userId);
+  }
+
+  if (text === "📈 Анализ расходов (AI)") {
+    const isFamily = isMain(userId);
+    const owner = isFamily ? null : userId;
+
+    const result = await analyzeExpenses(
+      db,
+      getAllTransactions,
+      owner,
+      isFamily
+    );
+    return bot.sendMessage(chatId, result, { parse_mode: "Markdown" });
+  }
+
+  if (text === "📉 График доходов/расходов") {
+    const isFamily = isMain(userId);
+    const owner = isFamily ? null : userId;
+
+    try {
+      const img = await generateIncomeExpenseChart(
+        db,
+        getAllTransactions,
+        owner,
+        isFamily
+      );
+      return bot.sendPhoto(chatId, img);
+    } catch (e) {
+      console.error(e);
+      return bot.sendMessage(chatId, "❌ Недостаточно данных.");
     }
+  }
 
-    if (text === "📉 График доходов/расходов") {
-        try {
-            const img = await generateIncomeExpenseChart(db, getAllTransactions, userId);
-            return bot.sendPhoto(chatId, img);
-        } catch {
-            return bot.sendMessage(chatId, "❌ Недостаточно данных.");
-        }
+  // Если есть состояние — обрабатываем его
+  const stateObj = getUserState(userId);
+  if (stateObj) return handleStateMessage(msg, stateObj);
+
+  // Если пользователь — главный и мы не в состоянии, можно отправить вопрос в AI
+  if (isMain(userId)) {
+    try {
+      const answer = await askLlama(text);
+      return bot.sendMessage(chatId, answer);
+    } catch (e) {
+      console.error(e);
+      return bot.sendMessage(chatId, "❌ Ошибка Llama.");
     }
+  }
 
-    // 🟡 Обработка состояний (ввод суммы и т.д.)
-    const state = getUserState(userId);
-    if (state) return handleStateMessage(msg, state);
-
-    // 🟠 AI-режим — ДОЛЖЕН ИДТИ ПОСЛЕДНИМ!
-    if (state?.state === "ai_mode") {
-        try {
-            const reply = await askLlama(text);
-            return bot.sendMessage(chatId, reply);
-        } catch {
-            return bot.sendMessage(chatId, "❌ Ошибка AI.");
-        }
-    }
-
-    return bot.sendMessage(chatId, "Используй кнопки 😊");
+  bot.sendMessage(chatId, "Используй кнопки 😊");
 });
 
-
 /************************************************************
- * CALLBACK-QUERY
+ * CALLBACK-QUERY (кнопки inline)
  ************************************************************/
 bot.on("callback_query", (query) => {
   const data = query.data;
   const chatId = query.message.chat.id;
   const userId = query.from.id;
 
-  const [action, name, owner] = data.split("|");
+  // КРЕДИТЫ
+  if (data === "credit:add") {
+    saveUserState(userId, { state: "credit_name" });
+    bot.sendMessage(chatId, "Введите название кредита:");
+  } else if (data === "credit:list") {
+    showCreditListFor(chatId, userId);
+  } else if (data === "credit:pay") {
+    showCreditChooseForPayment(chatId, userId);
+  } else if (data === "credit:delete") {
+    showCreditChooseForDelete(chatId, userId);
+  } else if (data.startsWith("credit_pay:")) {
+    const creditId = Number(data.split(":")[1]);
+    saveUserState(userId, {
+      state: "credit_payment_amount",
+      creditId
+    });
+    bot.sendMessage(chatId, "Введите сумму платежа:");
+  } else if (data.startsWith("credit_del:")) {
+    const creditId = Number(data.split(":")[1]);
+    deleteCredit(db, creditId, () => {
+      bot.sendMessage(chatId, "🗑 Кредит удалён.");
+    });
+  }
 
-  switch (action) {
-    case "add_credit":
-      saveUserState(userId, { state: "credit_name" });
-      bot.sendMessage(chatId, "Введите название кредита:");
-      break;
+  // ДОХОДЫ/РАСХОДЫ – КАТЕГОРИИ/ПОДКАТЕГОРИИ
+  else if (data.startsWith("inc_cat:")) {
+    const category = data.substring("inc_cat:".length);
+    saveUserState(userId, {
+      state: "income_choose_subcategory",
+      category
+    });
 
-    case "show_credit_list":
-      showCreditListFor(db, chatId, userId);
-      break;
+    const keyboard = buildSubcategoryKeyboard(
+      INCOME_CATEGORIES,
+      category,
+      "inc"
+    );
 
-    case "pay_credit":
-      showCreditChooseForPayment(chatId, userId);
-      break;
-
-    case "choose_credit_payment":
+    if (keyboard) {
+      bot.sendMessage(chatId, "Выберите подкатегорию дохода:", keyboard);
+    } else {
       saveUserState(userId, {
-        state: "credit_payment_amount",
-        creditName: name,
-        creditOwnerId: Number(owner)
+        state: "income_amount",
+        category,
+        subcategory: ""
       });
-      bot.sendMessage(chatId, "Введите сумму платежа:");
-      break;
+      bot.sendMessage(chatId, "Введите сумму дохода:");
+    }
+  } else if (data.startsWith("inc_sub:")) {
+    const [, category, subcategory] = data.split(":");
+    saveUserState(userId, {
+      state: "income_amount",
+      category,
+      subcategory
+    });
+    bot.sendMessage(chatId, "Введите сумму дохода:");
+  } else if (data.startsWith("exp_cat:")) {
+    const category = data.substring("exp_cat:".length);
+    saveUserState(userId, {
+      state: "expense_choose_subcategory",
+      category
+    });
 
-    case "delete_credit":
-      showCreditChooseForDelete(chatId, userId);
-      break;
+    const keyboard = buildSubcategoryKeyboard(
+      EXPENSE_CATEGORIES,
+      category,
+      "exp"
+    );
 
-    case "choose_credit_delete":
-      deleteCredit(db, Number(owner), name, () => {
-        bot.sendMessage(chatId, `🗑 Кредит *${name}* удалён`, {
-          parse_mode: "Markdown"
-        });
+    if (keyboard) {
+      bot.sendMessage(chatId, "Выберите подкатегорию расхода:", keyboard);
+    } else {
+      saveUserState(userId, {
+        state: "expense_amount",
+        category,
+        subcategory: ""
       });
-      break;
+      bot.sendMessage(chatId, "Введите сумму расхода:");
+    }
+  } else if (data.startsWith("exp_sub:")) {
+    const [, category, subcategory] = data.split(":");
+    saveUserState(userId, {
+      state: "expense_amount",
+      category,
+      subcategory
+    });
+    bot.sendMessage(chatId, "Введите сумму расхода:");
   }
 
   bot.answerCallbackQuery(query.id);
 });
 
 /************************************************************
- * ОБРАБОТКА СОСТОЯНИЙ
+ * ОБРАБОТКА СОСТОЯНИЙ (ВВОД СУММ, ДАННЫЕ ПО КРЕДИТАМ)
  ************************************************************/
+function parseAmount(text) {
+  const num = Number(String(text).replace(",", "."));
+  return isNaN(num) ? null : num;
+}
+
 function handleStateMessage(msg, stateObj) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const text = msg.text.trim();
+  const text = (msg.text || "").trim();
 
   switch (stateObj.state) {
-    case "income_amount":
-      saveTransaction(db, msg.from, "income", "Доход", Number(text), "", false, "");
-      clearUserState(userId);
-      bot.sendMessage(chatId, "Доход сохранён", getMainMenuKeyboard(userId));
-      break;
+    /**************** ДОХОД ****************/
+    case "income_amount": {
+      const amount = parseAmount(text);
+      if (amount == null || amount <= 0) {
+        return bot.sendMessage(chatId, "Введите корректную сумму дохода.");
+      }
 
-    case "expense_amount":
-      saveTransaction(db, msg.from, "expense", "Расход", Number(text), "", false, "");
-      clearUserState(userId);
-      bot.sendMessage(chatId, "Расход сохранён", getMainMenuKeyboard(userId));
-      break;
+      saveTransaction(
+        db,
+        userId,
+        "income",
+        "Доход",
+        amount,
+        stateObj.category,
+        stateObj.subcategory
+      );
 
-    case "credit_name":
+      clearUserState(userId);
+      bot.sendMessage(chatId, "Доход сохранён ✅", getMainMenuKeyboard(userId));
+      break;
+    }
+
+    /**************** РАСХОД ****************/
+    case "expense_amount": {
+      const amount = parseAmount(text);
+      if (amount == null || amount <= 0) {
+        return bot.sendMessage(chatId, "Введите корректную сумму расхода.");
+      }
+
+      saveTransaction(
+        db,
+        userId,
+        "expense",
+        "Расход",
+        amount,
+        stateObj.category,
+        stateObj.subcategory
+      );
+
+      clearUserState(userId);
+      bot.sendMessage(chatId, "Расход сохранён ✅", getMainMenuKeyboard(userId));
+      break;
+    }
+
+    /**************** КРЕДИТЫ – СОЗДАНИЕ ****************/
+    case "credit_name": {
       stateObj.name = text;
-      stateObj.state = "credit_amount";
+      stateObj.state = "credit_total";
       saveUserState(userId, stateObj);
-      bot.sendMessage(chatId, "Введите сумму кредита:");
+      bot.sendMessage(chatId, "Введите полную сумму кредита:");
       break;
+    }
 
-    case "credit_amount":
-      stateObj.amount = Number(text);
+    case "credit_total": {
+      const total = parseAmount(text);
+      if (total == null || total <= 0) {
+        return bot.sendMessage(chatId, "Введите корректную полную сумму кредита.");
+      }
+      stateObj.total = total;
       stateObj.state = "credit_percent";
       saveUserState(userId, stateObj);
-      bot.sendMessage(chatId, "Введите процент:");
+      bot.sendMessage(chatId, "Введите процент по кредиту (годовой, просто число):");
       break;
+    }
 
-    case "credit_percent":
-      stateObj.percent = Number(text);
+    case "credit_percent": {
+      const percent = parseAmount(text) ?? 0;
+      stateObj.percent = percent;
+      stateObj.state = "credit_monthly";
+      saveUserState(userId, stateObj);
+      bot.sendMessage(chatId, "Введите плановый ежемесячный платёж:");
+      break;
+    }
+
+    case "credit_monthly": {
+      const monthly = parseAmount(text);
+      if (monthly == null || monthly <= 0) {
+        return bot.sendMessage(chatId, "Введите корректный ежемесячный платёж.");
+      }
+      stateObj.monthly = monthly;
       stateObj.state = "credit_day";
       saveUserState(userId, stateObj);
       bot.sendMessage(chatId, "Введите день платежа (1–31):");
       break;
+    }
 
-    case "credit_day":
-      const payDay = Number(text);
-      addCredit(db, userId, stateObj.name, stateObj.amount, stateObj.percent, payDay);
-      clearUserState(userId);
-      bot.sendMessage(chatId, "Кредит добавлен! ✔ Напоминания включены.", getMainMenuKeyboard(userId));
+    case "credit_day": {
+      const day = Number(text);
+      if (!Number.isInteger(day) || day < 1 || day > 31) {
+        return bot.sendMessage(chatId, "Введите число от 1 до 31.");
+      }
+
+      addCredit(
+        db,
+        userId,
+        stateObj.name,
+        stateObj.total,
+        stateObj.percent,
+        day,
+        stateObj.monthly,
+        () => {
+          clearUserState(userId);
+          bot.sendMessage(
+            chatId,
+            "Кредит добавлен! ✔ Напоминания включены.",
+            getMainMenuKeyboard(userId)
+          );
+        }
+      );
       break;
+    }
 
-    case "credit_payment_amount":
-      const sum = Number(text);
-      updateCreditPaid(db, stateObj.creditOwnerId, stateObj.creditName, sum);
+    /**************** КРЕДИТЫ – ОПЛАТА ****************/
+    case "credit_payment_amount": {
+      const amount = parseAmount(text);
+      if (amount == null || amount <= 0) {
+        return bot.sendMessage(chatId, "Введите корректную сумму платежа.");
+      }
 
-      saveTransaction(db, msg.from, "expense", "Кредиты", sum, "", true, stateObj.creditName);
+      updateCreditPaid(db, stateObj.creditId, amount, () => {
+        // сохраняем как расход
+        saveTransaction(
+          db,
+          userId,
+          "expense",
+          "Кредит",
+          amount,
+          CREDIT_CATEGORY_NAME,
+          "Платёж по кредиту",
+          true,
+          stateObj.creditId,
+          ""
+        );
 
-      clearUserState(userId);
-      bot.sendMessage(chatId, "Платёж сохранён!", getMainMenuKeyboard(userId));
+        clearUserState(userId);
+        bot.sendMessage(
+          chatId,
+          "Платёж по кредиту сохранён ✅",
+          getMainMenuKeyboard(userId)
+        );
+      });
       break;
+    }
+
+    default:
+      clearUserState(userId);
+      bot.sendMessage(chatId, "Состояние сброшено.", getMainMenuKeyboard(userId));
   }
 }
-
-
