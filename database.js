@@ -72,17 +72,20 @@ function ensureUserRegistered(db, from) {
  * ТРАНЗАКЦИИ: ДОХОДЫ И РАСХОДЫ
  ************************************************************/
 function saveTransaction(db, from, type, name, amount, category, isCredit, creditName) {
-  const now = new Date().toISOString().slice(0, 10);
-  db.run(
-    `
-    INSERT INTO ${TABLE_TRANSACTIONS}
-    (owner_id, name, amount, type, category, isCredit, creditName, date)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-    [from.id, name, amount, type, category, isCredit ? 1 : 0, creditName, now]
-  );
-}
+    const now = new Date().toISOString().slice(0, 10);
 
+    db.run(
+        `
+        INSERT INTO ${TABLE_TRANSACTIONS}
+        (owner_id, name, amount, type, category, isCredit, creditName, date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [from.id, name, amount, type, category, isCredit ? 1 : 0, creditName, now],
+        (err) => {
+            if (err) console.error("saveTransaction error:", err);
+        }
+    );
+}
 function getAllTransactions(db, ownerId, callback) {
   let query = `SELECT * FROM ${TABLE_TRANSACTIONS}`;
   let params = [];
@@ -245,6 +248,7 @@ module.exports = {
   updateCreditPaid,
   deleteCredit
 };
+
 
 
 
