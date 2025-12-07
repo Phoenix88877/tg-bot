@@ -14,7 +14,7 @@ function initDb(dbFileName = "finance.db") {
   const db = new sqlite3.Database(dbPath);
 
   db.serialize(() => {
-    /**************** USERS ****************/
+    /******************** USERS ********************/
     db.run(`
       CREATE TABLE IF NOT EXISTS ${TABLE_USERS} (
         id INTEGER PRIMARY KEY,
@@ -22,32 +22,34 @@ function initDb(dbFileName = "finance.db") {
       )
     `);
 
-    /**************** TRANSACTIONS ****************/
+    /******************** TRANSACTIONS ********************/
     db.run(`
       CREATE TABLE IF NOT EXISTS ${TABLE_TRANSACTIONS} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_id INTEGER,
+        owner_id INTEGER NOT NULL,
+        type TEXT NOT NULL,          -- 'income' | 'expense'
         name TEXT,
-        amount REAL,
-        type TEXT,
         category TEXT,
-        isCredit INTEGER,
-        creditName TEXT,
-        date TEXT
+        subcategory TEXT,
+        amount REAL NOT NULL,
+        is_credit INTEGER DEFAULT 0,
+        credit_id INTEGER,
+        credit_name TEXT,
+        date TEXT NOT NULL
       )
     `);
 
-    /**************** CREDITS ****************/
+    /******************** CREDITS ********************/
     db.run(`
       CREATE TABLE IF NOT EXISTS ${TABLE_CREDITS} (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner_id INTEGER,
-        name TEXT,
-        amount REAL,
-        percent REAL,
-        paid REAL,
-        payment_day INTEGER,
-        next_payment_date TEXT
+        owner_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        total REAL NOT NULL,              -- полная сумма кредита
+        paid REAL NOT NULL DEFAULT 0,     -- уже выплачено
+        percent REAL NOT NULL DEFAULT 0,  -- % годовых (просто для информации/плана)
+        pay_day INTEGER NOT NULL,         -- день месяца (1–31)
+        monthly_payment REAL NOT NULL DEFAULT 0  -- плановый ежемесячный платёж
       )
     `);
   });
@@ -59,196 +61,229 @@ function initDb(dbFileName = "finance.db") {
  * РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ
  ************************************************************/
 function ensureUserRegistered(db, from) {
-    db.run(
-        `INSERT OR IGNORE INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
-        [from.id, from.first_name || ""],
-        (err) => {
-            if (err) console.error("ensureUserRegistered error:", err);
-        }
-    );
+  db.run(
+    `INSERT OR IGNORE INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
+    [from.id, from.first_name || ""],
+    (err) => {
+      if (err) {
+        console.error("ensureUserRegistered error:", err);
+      }
+    }
+  );
 }
 
 /************************************************************
  * ТРАНЗАКЦИИ: ДОХОДЫ И РАСХОДЫ
  ************************************************************/
-function saveTransaction(db, from, type, name, amount, category, isCredit, creditName) {
-    const now = new Date().toISOString().slice(0, 10);
+function saveTransaction(
+  db,
+  ownerId,
+  type,          // 'income' | 'expense'
+  name,
+  amount,
+  category,
+  subcategory,
+  isCredit = false,
+  creditId = null,
+  creditName = ""
+) {
+  const now = new Date().toISOString().slice(0, 10);
 
-    db.run(
-        `
-        INSERT INTO ${TABLE_TRANSACTIONS}
-        (owner_id, name, amount, type, category, isCredit, creditName, date)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        [from.id, name, amount, type, category, isCredit ? 1 : 0, creditName, now],
-        (err) => {
-            if (err) console.error("saveTransaction error:", err);
-        }
-    );
+  db.run(
+    `
+    INSERT INTO ${TABLE_TRANSACTIONS}
+      (owner_id, type, name, category, subcategory, amount, is_credit, credit_id, credit_name, date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+    [
+      ownerId,
+      type,
+      name,
+      category || "",
+      subcategory || "",
+      amount,
+      isCredit ? 1 : 0,
+      creditId,
+      creditName || "",
+      now
+    ],
+    (err) => {
+      if (err) {
+        console.error("saveTransaction error:", err);
+      }
+    }
+  );
 }
+
 function getAllTransactions(db, ownerId, callback) {
   let query = `SELECT * FROM ${TABLE_TRANSACTIONS}`;
-  let params = [];
+  const params = [];
 
-  if (ownerId) {
-    query += ` WHERE owner_id = ?`;
+  if (ownerId != null) {
+    query += " WHERE owner_id = ?";
     params.push(ownerId);
   }
 
+  query += " ORDER BY date ASC, id ASC";
+
   db.all(query, params, (err, rows) => {
     if (err) {
-      console.error("getAllTransactions:", err);
+      console.error("getAllTransactions error:", err);
       return callback([]);
     }
     callback(rows);
   });
 }
 
-/************************************************************
- * ДОХОД / РАСХОД / БАЛАНС
- ************************************************************/
 function getBalance(db, ownerId, callback) {
-  db.all(
-    `SELECT * FROM ${TABLE_TRANSACTIONS} WHERE owner_id = ?`,
+  db.get(
+    `
+    SELECT
+      COALESCE(SUM(CASE WHEN type = 'income' THEN amount END), 0) AS income,
+      COALESCE(SUM(CASE WHEN type = 'expense' THEN amount END), 0) AS expense
+    FROM ${TABLE_TRANSACTIONS}
+    WHERE owner_id = ?
+  `,
     [ownerId],
-    (err, rows) => {
-      if (err) return callback({ income: 0, expense: 0 });
-
-      let income = 0;
-      let expense = 0;
-
-      rows.forEach((t) => {
-        if (t.type === "income") income += t.amount;
-        if (t.type === "expense") expense += t.amount;
+    (err, row) => {
+      if (err) {
+        console.error("getBalance error:", err);
+        return callback({ income: 0, expense: 0 });
+      }
+      callback({
+        income: row.income || 0,
+        expense: row.expense || 0
       });
-
-      callback({ income, expense });
     }
   );
-}
-
-function getMonthlyIncome(db, ownerId, callback) {
-  const nowMonth = new Date().toISOString().slice(0, 7);
-
-  let query = `SELECT * FROM ${TABLE_TRANSACTIONS} WHERE date LIKE ? AND type = 'income'`;
-  let params = [`${nowMonth}%`];
-
-  if (ownerId) {
-    query += ` AND owner_id = ?`;
-    params.push(ownerId);
-  }
-
-  db.all(query, params, (err, rows) => {
-    if (err) return callback(0);
-
-    const sum = rows.reduce((acc, r) => acc + r.amount, 0);
-    callback(sum);
-  });
 }
 
 /************************************************************
  * КРЕДИТЫ
  ************************************************************/
-function addCredit(db, ownerId, name, amount, percent, payment_day) {
-  const today = new Date();
-  const year = today.getFullYear();
-  let month = today.getMonth();
-
-  // Если день уже прошёл — переносим на следующий месяц
-  if (today.getDate() > payment_day) {
-    month += 1;
-  }
-
-  const nextDate = new Date(year, month, payment_day)
-    .toISOString()
-    .slice(0, 10);
-
+function addCredit(
+  db,
+  ownerId,
+  name,
+  total,
+  percent,
+  payDay,
+  monthlyPayment,
+  callback
+) {
   db.run(
     `
     INSERT INTO ${TABLE_CREDITS}
-    (owner_id, name, amount, percent, paid, payment_day, next_payment_date)
-    VALUES (?, ?, ?, ?, 0, ?, ?)
+      (owner_id, name, total, paid, percent, pay_day, monthly_payment)
+    VALUES (?, ?, ?, 0, ?, ?, ?)
   `,
-    [ownerId, name, amount, percent, payment_day, nextDate]
-  );
-}
-
-function updateCreditPaid(db, ownerId, creditName, amount) {
-  db.get(
-    `
-    SELECT * FROM ${TABLE_CREDITS}
-    WHERE owner_id = ? AND name = ?
-    `,
-    [ownerId, creditName],
-    (err, row) => {
-      if (err || !row) return;
-
-      const newPaid = Number(row.paid || 0) + Number(amount);
-
-      db.run(
-        `
-        UPDATE ${TABLE_CREDITS}
-        SET paid = ?
-        WHERE id = ?
-      `,
-        [newPaid, row.id]
-      );
+    [ownerId, name, total, percent, payDay, monthlyPayment],
+    function (err) {
+      if (err) {
+        console.error("addCredit error:", err);
+        if (callback) callback(null);
+        return;
+      }
+      if (callback) callback(this.lastID);
     }
   );
 }
 
 function getCreditsForOwner(db, ownerId, callback) {
   db.all(
-    `SELECT * FROM ${TABLE_CREDITS} WHERE owner_id = ?`,
+    `
+    SELECT *, (total - paid) AS remaining
+    FROM ${TABLE_CREDITS}
+    WHERE owner_id = ?
+    ORDER BY name
+  `,
     [ownerId],
     (err, rows) => {
-      if (err) return callback([]);
+      if (err) {
+        console.error("getCreditsForOwner error:", err);
+        return callback([]);
+      }
       callback(rows);
     }
   );
 }
 
 function getAllCredits(db, callback) {
-  db.all(`SELECT * FROM ${TABLE_CREDITS}`, [], (err, rows) => {
-    if (err) return callback([]);
-    callback(rows);
-  });
+  db.all(
+    `
+    SELECT *, (total - paid) AS remaining
+    FROM ${TABLE_CREDITS}
+    ORDER BY owner_id, name
+  `,
+    [],
+    (err, rows) => {
+      if (err) {
+        console.error("getAllCredits error:", err);
+        return callback([]);
+      }
+      callback(rows);
+    }
+  );
 }
 
-/************************************************************
- * УДАЛЕНИЕ КРЕДИТА
- ************************************************************/
-function deleteCredit(db, ownerId, creditName, callback) {
+function updateCreditPaid(db, creditId, amount, callback) {
   db.run(
     `
-    DELETE FROM ${TABLE_CREDITS}
-    WHERE owner_id = ? AND name = ?
+    UPDATE ${TABLE_CREDITS}
+    SET paid = paid + ?
+    WHERE id = ?
   `,
-    [ownerId, creditName],
+    [amount, creditId],
     (err) => {
-      if (err) console.error("deleteCredit:", err);
+      if (err) {
+        console.error("updateCreditPaid error:", err);
+      }
       if (callback) callback();
     }
   );
 }
 
-/************************************************************
- * ЭКСПОРТ
- ************************************************************/
+function deleteCredit(db, creditId, callback) {
+  db.run(
+    `DELETE FROM ${TABLE_CREDITS} WHERE id = ?`,
+    [creditId],
+    (err) => {
+      if (err) {
+        console.error("deleteCredit error:", err);
+      }
+      if (callback) callback();
+    }
+  );
+}
+
+function getCreditsDueToday(db, dayOfMonth, callback) {
+  db.all(
+    `
+    SELECT *, (total - paid) AS remaining
+    FROM ${TABLE_CREDITS}
+    WHERE pay_day = ?
+  `,
+    [dayOfMonth],
+    (err, rows) => {
+      if (err) {
+        console.error("getCreditsDueToday error:", err);
+        return callback([]);
+      }
+      callback(rows);
+    }
+  );
+}
+
 module.exports = {
   initDb,
   ensureUserRegistered,
   saveTransaction,
   getAllTransactions,
-  getMonthlyIncome,
   getBalance,
   addCredit,
   getCreditsForOwner,
   getAllCredits,
   updateCreditPaid,
-  deleteCredit
+  deleteCredit,
+  getCreditsDueToday
 };
-
-
-
-
