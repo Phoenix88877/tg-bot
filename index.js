@@ -271,73 +271,64 @@ function beginAddExpense(chatId, userId) {
  * ОБРАБОТКА СООБЩЕНИЙ
  ************************************************************/
 bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const text = (msg.text || "").trim();
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const text = (msg.text || "").trim();
 
-  if (!isAllowedUser(userId))
-    return bot.sendMessage(chatId, "⛔ Нет доступа.");
+    if (!isAllowedUser(userId))
+        return bot.sendMessage(chatId, "⛔ Нет доступа.");
 
-  ensureUserRegistered(db, msg.from);
+    ensureUserRegistered(db, msg.from);
 
-  if (text === "/start") return showMainMenu(chatId, userId);
+    if (text === "/start")
+        return showMainMenu(chatId, userId);
 
-  if (text === "🤖 AI-помощник") {
-    saveUserState(userId, { state: "ai_mode" });
-    return bot.sendMessage(chatId, "🧠 Напиши вопрос.");
-  }
-
-  const state = getUserState(userId);
-
-  if (state?.state === "ai_mode") {
-    try {
-      const reply = await askLlama(text);
-      return bot.sendMessage(chatId, reply);
-    } catch {
-      return bot.sendMessage(chatId, "❌ Ошибка AI.");
+    // Запуск AI режима
+    if (text === "🤖 AI-помощник") {
+        saveUserState(userId, { state: "ai_mode" });
+        return bot.sendMessage(chatId, "🧠 Напиши вопрос.");
     }
-  }
 
-  if (text === "➕ Доход") return beginAddIncome(chatId, userId);
-  if (text === "➖ Расход") return beginAddExpense(chatId, userId);
-  if (text === "💳 Кредиты") return showCreditsMenu(chatId);
-  if (text === "📊 Баланс") return showBalance(chatId, userId);
-  if (text === "📅 План по кредитам") return showCreditPlan(chatId, userId);
+    // 🟡 Обработка кнопок — ДОЛЖНА ИДТИ ДО AI
+    if (text === "➕ Доход") return beginAddIncome(chatId, userId);
+    if (text === "➖ Расход") return beginAddExpense(chatId, userId);
+    if (text === "💳 Кредиты") return showCreditsMenu(chatId);
+    if (text === "📊 Баланс") return showBalance(chatId, userId);
+    if (text === "📅 План по кредитам") return showCreditPlan(chatId, userId);
 
-  if (text === "📈 Анализ расходов (AI)") {
-    const isFamily = isMain(userId);
-    const owner = isFamily ? null : userId;
-
-    const result = await analyzeExpenses(db, getAllTransactions, owner, isFamily);
-    return bot.sendMessage(chatId, result, { parse_mode: "Markdown" });
-  }
-
-  if (text === "📉 График доходов/расходов") {
-    const isFamily = isMain(userId);
-    const owner = isFamily ? null : userId;
-
-    try {
-      const img = await generateIncomeExpenseChart(db, getAllTransactions, owner, isFamily);
-      return bot.sendPhoto(chatId, img);
-    } catch {
-      return bot.sendMessage(chatId, "❌ Недостаточно данных.");
+    if (text === "📈 Анализ расходов (AI)") {
+        const isFamily = isMain(userId);
+        const owner = isFamily ? null : userId;
+        const result = await analyzeExpenses(db, getAllTransactions, owner, isFamily);
+        return bot.sendMessage(chatId, result, { parse_mode: "Markdown" });
     }
-  }
 
-  const stateObj = getUserState(userId);
-  if (stateObj) return handleStateMessage(msg, stateObj);
-
-  if (isMain(userId)) {
-    try {
-      const answer = await askLlama(text);
-      return bot.sendMessage(chatId, answer);
-    } catch {
-      return bot.sendMessage(chatId, "❌ Ошибка Llama.");
+    if (text === "📉 График доходов/расходов") {
+        try {
+            const img = await generateIncomeExpenseChart(db, getAllTransactions, userId);
+            return bot.sendPhoto(chatId, img);
+        } catch {
+            return bot.sendMessage(chatId, "❌ Недостаточно данных.");
+        }
     }
-  }
 
-  bot.sendMessage(chatId, "Используй кнопки 😊");
+    // 🟡 Обработка состояний (ввод суммы и т.д.)
+    const state = getUserState(userId);
+    if (state) return handleStateMessage(msg, state);
+
+    // 🟠 AI-режим — ДОЛЖЕН ИДТИ ПОСЛЕДНИМ!
+    if (state?.state === "ai_mode") {
+        try {
+            const reply = await askLlama(text);
+            return bot.sendMessage(chatId, reply);
+        } catch {
+            return bot.sendMessage(chatId, "❌ Ошибка AI.");
+        }
+    }
+
+    return bot.sendMessage(chatId, "Используй кнопки 😊");
 });
+
 
 /************************************************************
  * CALLBACK-QUERY
@@ -448,4 +439,5 @@ function handleStateMessage(msg, stateObj) {
       break;
   }
 }
+
 
