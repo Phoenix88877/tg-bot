@@ -1,5 +1,4 @@
 // graphs.js
-const { createCanvas } = require("canvas");
 const Chart = require("chart.js/auto");
 
 // График доходов/расходов по месяцам (12 месяцев максимум)
@@ -85,3 +84,4 @@ function generateIncomeExpenseChart(db, getAllTransactionsFn, ownerId, isFamily)
 module.exports = {
   generateIncomeExpenseChart,
 };
+
