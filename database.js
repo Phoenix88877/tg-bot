@@ -59,21 +59,13 @@ function initDb(dbFileName = "finance.db") {
  * РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЕЙ
  ************************************************************/
 function ensureUserRegistered(db, from) {
-  db.get(
-    `SELECT id FROM ${TABLE_USERS} WHERE id = ?`,
-    [from.id],
-    (err, row) => {
-      if (err) return console.error("ensureUserRegistered:", err);
-      if (row) return;
-
-      db.run(
-  `INSERT OR IGNORE INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
-  [from.id, from.first_name || ""]
-);
-
-      );
-    }
-  );
+    db.run(
+        `INSERT OR IGNORE INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
+        [from.id, from.first_name || ""],
+        (err) => {
+            if (err) console.error("ensureUserRegistered error:", err);
+        }
+    );
 }
 
 /************************************************************
@@ -253,5 +245,6 @@ module.exports = {
   updateCreditPaid,
   deleteCredit
 };
+
 
 
