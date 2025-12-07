@@ -67,8 +67,10 @@ function ensureUserRegistered(db, from) {
       if (row) return;
 
       db.run(
-        `INSERT INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
-        [from.id, from.first_name || ""]
+  `INSERT OR IGNORE INTO ${TABLE_USERS} (id, first_name) VALUES (?, ?)`,
+  [from.id, from.first_name || ""]
+);
+
       );
     }
   );
@@ -251,4 +253,5 @@ module.exports = {
   updateCreditPaid,
   deleteCredit
 };
+
 
